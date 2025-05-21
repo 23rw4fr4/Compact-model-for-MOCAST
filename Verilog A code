@@ -1,0 +1,186 @@
+// VerilogA for FTJ/FeCAP based on based on NLS - up/down switching with same kinetics, no T-dependency 
+
+`include "constants.vams"
+`include "disciplines.vams"
+
+module z_FTJ_NLS_V7(nfe1,nfe2);
+
+electrical nfe1, nfe2;
+
+// externally accessible parameters
+parameter real Pstart = 0.2;										
+parameter integer ENleakage = 1;									// flag to enable leakage current
+parameter real Atot = 3.14159e-8;								    // FTJ area - default value 1um^2
+
+// internal parameters
+
+//polarization
+real Pdyn;															// dynamic polarization variables
+real Pr = 0.2;														// max polarization [C / m]
+real absttime, absttimeold = 0.0;								     	// absolute time now and of the timestep before
+
+real Vapp, Vappmin=0.5;												// setting a minimal value for voltage
+real gamma;															// parameter for V-dpendence of switching distribution
+real tmean, tmeanmax=3.0e5;											// mean switching time for applied voltage - adjusted in each step
+
+real tau0pos = 2.00e-6;	  											// parameter for V-dependence of switching speed
+real tau0neg = 2.00e-6;	  											// parameter for V-dependence of switching speed
+real alphapos = 70;			     									// parameter for V-dependence of switching speed 
+real alphaneg = 70;			     									// parameter for V-dependence of switching speed 
+real kkpos = 2;														// parameter for V-dependence of switching speed					
+real kkneg = 2;														// parameter for V-dependence of switching speed
+real ggpos = 8e-10;													// parameter for V-dependence of switching speed
+real ggneg = 8e-10;													// parameter for V-dependence of switching speed
+
+real gamma0pos =	0.2;													// parameter for V-dpendence of switching distribution
+real gamma0neg =	0.2;													// parameter for V-dpendence of switching distribution
+real betapos = 12;													// parameter for V-dpendence of switching distribution
+real betaneg = 12;													// parameter for V-dpendence of switching distribution
+real yypos = 0.11;													// parameter for V-dependence of switching speed
+real yyneg = 0.11;													// parameter for V-dependence of switching speed
+real xxpos = 1.4;													// parameter for V-dependence of switching speed
+real xxneg = 1.4;													// parameter for V-dependence of switching speed
+
+real S;																// portion of switched domains (0=-Pr, 1= Pr)		
+real teffnew, teffold;												// effetive time update
+real delta_t;														// the time step length
+
+// update teff
+real M_PI=3.14;														// PI
+real const_t = 2E-5;
+real rhs, delta;
+real tolerance;  // Convergence tolerance
+
+// dielectric capacitor parameters
+real Tfe = 10.0e-9; 													// ferroelectric thicknes [m] - default is 10nm
+real epsilonrFE = 30.0, epsilonrDE = 17.0, fpara = 0.3;					// static parameters (relative permittivity of ferro- and dielectric grains, fraction of di-/paraelectric grains)
+real epsscaler = 0.6;													// effective lower k-value in FTJ due to additional dielectric layer
+real Afe, Adiel;														// area of ferroelectric and para-/dielectric grains
+real C0;																// capacitance
+
+// leakage parameter 
+real VPE_on = 140, VPE_off = 140, V2_on = 4.45, V2_off = 4.45, VPE_neg = 3;	  // fitting parameter of FTJ model
+real RA0_on = 3e9, RA0_off = 7.8e8, RA0_neg = 40;
+real Ileakage, Jleakage, Ileakage_on, Ileakage_off, Ileakage_pos, Ileakage_neg, Jtot;		// leakage current						
+real Q, QP, QC, IdP, IdC, IdQ, JdP, JdC, JdQ; 							// polarization and backgground charge and respective dynapic currents
+
+// test paraeter
+real IdC_1, IdC_2, IdC_3, IdC_4, IdC_5, IdP1, IdP2, IdP3;
+
+branch(nfe1,nfe2) nonlin;
+
+analog begin
+
+/*---------------SETTING INITIAL STATES OF Adiel, Afe, C0, Ec, Pold and w------*/	
+	@(initial_step)
+		begin
+			Adiel = Atot * fpara;											// [m]
+			Afe = Atot * (1.0-fpara);									// [m]
+			C0 = epsscaler*(epsilonrDE * Adiel + epsilonrFE * Afe) * 8.85e-12/Tfe;	// [C]
+			absttimeold = $abstime;															// inintialize timing and delta-t
+			S = Pstart/Pr/2 + 0.5;													// set inintal value of S between 0 and 1, depending on Pstart parameter (between -0.2 and 0.2) 
+ 			S = max(0.05, min(S, 0.95));     
+		end
+
+/*-------------CALCULATION OF DYNAMIC/ STATIC E-FIELD-----------------*/
+	absttime = $abstime;																		// actual time step
+	delta_t = absttime - absttimeold;
+
+	Vapp=max(abs(V(nonlin)), Vappmin);
+	
+	if (V(nonlin)>=0)																// pos. or neg. voltage applied? 
+		begin
+			tmean = tau0pos / ( exp(-alphapos/Vapp/Vapp + kkpos) + ggpos );								// determine switching time parameters for applied voltage 																			// here independent on switching direction
+			gamma = gamma0pos / (exp(-betapos/Vapp + xxpos) + yypos);									// mean switching time tmean  and distribution widht gamma
+
+			if (tmean<tmeanmax)
+			 	begin
+
+        teffold = 1e-3;    // Initial guess, adjust if needed
+        rhs = 1 / (1 / (0.5 - (1 / M_PI) * atan((log(tmean) - log(teffold)) / gamma)) + (const_t * pow(tmean, 0.25) / teffold));
+        delta = S - rhs;
+        tolerance = 0.00000001;
+
+        while (abs(delta) > tolerance) begin
+          teffold =pow(10, log(teffold) + (S - rhs)*1);
+          rhs = 1 / (1 / (0.5 - (1 / M_PI) * atan((log(tmean) - log(teffold)) / gamma)) + (const_t * pow(tmean, 0.25) / teffold));
+          delta = S - rhs;
+        end   // Loop until the error is within tolerance
+
+			teffnew = teffold + delta_t;
+
+					S = 1/( 1/ (0.5 - (atan((log(tmean)-log(teffnew))/gamma))/M_PI) + const_t * pow(tmean, 0.25) / teffnew);				// calculate new S for positive voltagerom teffnew
+				end
+		end 
+	else
+		begin
+			tmean = tau0neg / ( exp(-alphaneg/Vapp/Vapp + kkneg) + ggneg );					// determine switching time parameters for applied voltage 
+			gamma = gamma0neg / (exp(-betaneg/Vapp + xxneg) + yyneg);							// mean switching time tmean  and distribution widht gamma
+																
+			if (tmean<tmeanmax)
+			 	begin
+
+        teffold = 1e-3;    // Initial guess, adjust if needed
+        rhs = 1 - 1 / (1 / (0.5 - (1 / M_PI) * atan((log(tmean) - log(teffold)) / gamma)) + (const_t * pow(tmean, 0.25) / teffold));
+        delta = S - rhs;
+        tolerance = 0.00000001;
+        while (abs(delta) > tolerance) begin
+          teffold =pow(10, log(teffold) - (S - rhs)*1);
+          rhs = 1 - 1 / (1 / (0.5 - (1 / M_PI) * atan((log(tmean) - log(teffold)) / gamma)) + (const_t * pow(tmean, 0.25) / teffold));
+          delta = S - rhs;
+        end   // Loop until the error is within tolerance
+        // endfunction 
+
+			teffnew = teffold + delta_t;
+
+					S = 1 - 1/( 1/ (0.5 - (atan((log(tmean)-log(teffnew))/gamma))/M_PI) + const_t * pow(tmean, 0.25) / teffnew);	    
+			end
+		end
+
+    S = slew(S, 1e6, -1e6);
+    S = max(0.05, min(S, 0.95));
+	Pdyn = 2 * Pr * (S - 0.5);													 										// calculate new Pdyn
+	
+// polarization charge + background capacitance
+	QP = Pdyn * Afe;			// polarization charge
+	QC = C0 * V(nonlin); 		// dielectric background charge 
+	Q  = QP + QC;		  		// overall charge 
+	IdP = ddt(QP);				// polarization current - for debugging only
+	IdC = ddt(QC);
+  IdQ = IdP + IdC; 
+
+// leakage current
+	if (ENleakage == 0) 
+		begin
+		Ileakage = 0.0; 
+		end
+	else
+		begin 
+
+			if (V(nonlin)>=0)				// calculate FTJ current from internal voltage and S
+				begin
+					Ileakage_on = RA0_on * Atot * ( exp(-VPE_on/(V(nonlin)+V2_on)) - exp(-VPE_on/V2_on));
+   				Ileakage_off = RA0_off * Atot * ( exp(-VPE_off/(V(nonlin)+V2_off)) - exp(-VPE_off/V2_off));          
+					Ileakage_pos = S * Ileakage_on + (1-S) * Ileakage_off;
+					Ileakage = Ileakage_pos;
+				end
+			else
+				begin
+					Ileakage_neg = - RA0_neg * Atot * (exp(-V(nonlin) / VPE_neg) -1);
+					Ileakage = Ileakage_neg;	
+				end
+		end
+
+	absttimeold = absttime;
+     
+  JdP = IdP / Atot * 100;                           // calculate current density, uA/cm^2
+	JdC = IdC / Atot * 100;
+	JdQ = IdQ / Atot * 100;
+	Jleakage = Ileakage / Atot * 100;
+  Jtot = JdQ + Jleakage;
+
+	I(nonlin) <+ Ileakage + IdQ;     		// total output current of FTJ
+
+end
+
+endmodule
